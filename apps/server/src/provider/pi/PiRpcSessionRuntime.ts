@@ -91,6 +91,18 @@ type PiRpcCommand =
       message: string;
       images?: ReadonlyArray<{ type: "image"; data: string; mimeType: string }>;
     }
+  | {
+      id?: string;
+      type: "steer";
+      message: string;
+      images?: ReadonlyArray<{ type: "image"; data: string; mimeType: string }>;
+    }
+  | {
+      id?: string;
+      type: "follow_up";
+      message: string;
+      images?: ReadonlyArray<{ type: "image"; data: string; mimeType: string }>;
+    }
   | { id?: string; type: "abort" }
   | { id?: string; type: "switch_session"; sessionPath: string }
   | { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -572,24 +584,32 @@ export class PiRpcClient {
     if (input.thinkingLevel && input.thinkingLevel !== session.thinkingLevel) {
       await this.setThinkingLevel(session, input.thinkingLevel);
     }
-    const turnId = TurnId.make(randomUUID());
+    // If a turn is already running, steer into it instead of clobbering currentTurnId.
+    // This keeps the original turn lifecycle intact and lets the new user message
+    // be a steering prompt rather than leaving the old turn stuck on "running".
+    const isSteering = session.status === "running" && session.currentTurnId !== undefined;
+    const turnId = isSteering ? session.currentTurnId! : TurnId.make(randomUUID());
     const previous = {
       currentTurnId: session.currentTurnId,
       hasObservedTurnStart: session.hasObservedTurnStart,
       status: session.status,
       updatedAt: session.updatedAt,
     };
-    session.currentTurnId = turnId;
-    session.hasObservedTurnStart = false;
-    session.abortRequested = false;
-    session.status = "running";
-    session.updatedAt = new Date().toISOString();
+    if (!isSteering) {
+      session.currentTurnId = turnId;
+      session.hasObservedTurnStart = false;
+      session.abortRequested = false;
+      session.status = "running";
+      session.updatedAt = new Date().toISOString();
+    } else {
+      session.updatedAt = new Date().toISOString();
+    }
     try {
       const response = await this.sendCommand(session, {
-        type: "prompt",
+        type: isSteering ? "steer" : "prompt",
         message: input.input ?? "",
         ...(input.images && input.images.length > 0 ? { images: input.images } : {}),
-      });
+      } as PiRpcCommand);
       if (!response.success) {
         throw new Error(response.error ?? "Pi RPC prompt failed.");
       }
@@ -626,7 +646,8 @@ export class PiRpcClient {
     if (!session) throw new Error(`Unknown Pi RPC thread '${threadId}'.`);
     session.abortRequested = true;
     session.updatedAt = new Date().toISOString();
-    const response = await this.sendCommand(session, { type: "abort" });
+    // Abort can take longer than prompt round-trips; stay below RpcClient's 30s.
+    const response = await this.sendCommand(session, { type: "abort" }, 25_000);
     if (!response.success) throw new Error(response.error ?? "Pi RPC abort failed.");
   }
 
