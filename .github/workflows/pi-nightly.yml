@@ -159,15 +159,15 @@ jobs:
       - run: node scripts/update-release-package-versions.ts "${{ needs.sync.outputs.version }}"
       - run: vp run --filter @t3tools/web build
       - run: vp run --filter t3 build
-      - name: Pack server
+      - name: Pack server with production dependencies
         run: |
-          mkdir release
-          npm pack ./apps/server --pack-destination release
-          mv release/*.tgz release/t3-pi-server.tgz
+          rm -rf release/t3-pi-server release/t3-pi-server.tar.gz
+          npx pnpm@11.10.0 deploy --filter t3 --prod --legacy release/t3-pi-server
+          tar -C release -czf release/t3-pi-server.tar.gz t3-pi-server
       - uses: actions/upload-artifact@v7
         with:
           name: server
-          path: release/t3-pi-server.tgz
+          path: release/t3-pi-server.tar.gz
           if-no-files-found: error
 
   release:
