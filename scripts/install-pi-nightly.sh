@@ -4,7 +4,10 @@ set -euo pipefail
 repo=${T3_PI_REPO:-raviteja7748/t3code}
 command -v gh >/dev/null || { echo "gh is required" >&2; exit 1; }
 tag=$(gh api "repos/$repo/releases?per_page=30" --jq '[.[] | select(.prerelease and (.tag_name | startswith("pi-v")))] | first | .tag_name')
-[[ -n "$tag" ]] || { echo "No Pi nightly release found in $repo" >&2; exit 1; }
+if [[ -z "$tag" ]]; then
+  echo "No Pi nightly release found in $repo; leaving the current install unchanged." >&2
+  exit 0
+fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
