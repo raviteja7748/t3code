@@ -25,8 +25,12 @@ case "$(uname -s)" in
     echo "Installed /Applications/T3 Code Pi Nightly.app"
     ;;
   Linux)
-    gh release download "$tag" -R "$repo" -p 't3-pi-server.tgz' -D "$tmp"
     install_root="$HOME/.local/share/t3-pi"
+    if [[ -f "$install_root/.installed-tag" && $(<"$install_root/.installed-tag") == "$tag" ]]; then
+      echo "$tag is already installed"
+      exit 0
+    fi
+    gh release download "$tag" -R "$repo" -p 't3-pi-server.tgz' -D "$tmp"
     mkdir -p "$install_root" "$HOME/.local/bin"
     npm install --prefix "$install_root" --omit=dev "$tmp/t3-pi-server.tgz"
     cat > "$HOME/.local/bin/t3-pi" <<'EOF'
@@ -34,6 +38,7 @@ case "$(uname -s)" in
 exec node "$HOME/.local/share/t3-pi/node_modules/t3/dist/bin.mjs" "$@"
 EOF
     chmod +x "$HOME/.local/bin/t3-pi"
+    printf '%s\n' "$tag" > "$install_root/.installed-tag"
     systemctl --user try-restart t3-pi.service 2>/dev/null || true
     echo "Installed $HOME/.local/bin/t3-pi"
     ;;
