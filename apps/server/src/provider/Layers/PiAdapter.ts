@@ -411,9 +411,10 @@ export const makePiAdapter = (
             ...(options?.agentDir ? { agentDir: options.agentDir } : {}),
             ...(options?.env ? { env: options.env } : {}),
           };
-          return yield* Effect.tryPromise(() => client.startSession(startInput)).pipe(
-            Effect.mapError((cause) => toAdapterError(input.threadId, "startSession", cause)),
-          );
+          return yield* Effect.tryPromise({
+            try: () => client.startSession(startInput),
+            catch: (cause) => toAdapterError(input.threadId, "startSession", cause),
+          });
         }),
 
       sendTurn: (input) =>
@@ -439,29 +440,30 @@ export const makePiAdapter = (
               (image): image is { type: "image"; data: string; mimeType: string } =>
                 image !== undefined,
             );
-          return yield* Effect.tryPromise(() =>
-            client.sendTurn({
-              threadId: input.threadId,
-              ...(input.input ? { input: input.input } : {}),
-              ...(model ? { model } : {}),
-              ...(thinkingLevel ? { thinkingLevel } : {}),
-              ...(images.length > 0 ? { images } : {}),
-            }),
-          ).pipe(
-            Effect.mapError((cause) => toAdapterError(input.threadId, "sendTurn", cause)),
-            Effect.map((result) => result as ProviderTurnStartResult),
-          );
+          const turnResult = yield* Effect.tryPromise({
+            try: () =>
+              client.sendTurn({
+                threadId: input.threadId,
+                ...(input.input ? { input: input.input } : {}),
+                ...(model ? { model } : {}),
+                ...(thinkingLevel ? { thinkingLevel } : {}),
+                ...(images.length > 0 ? { images } : {}),
+              }),
+            catch: (cause) => toAdapterError(input.threadId, "sendTurn", cause),
+          });
+          return turnResult as ProviderTurnStartResult;
         }),
 
       interruptTurn: (threadId, turnId) =>
         Effect.gen(function* () {
           abortingTurnIds.set(String(threadId), turnId ? String(turnId) : "*");
-          yield* Effect.tryPromise(() => client.interruptTurn(threadId)).pipe(
-            Effect.mapError((cause) => {
+          yield* Effect.tryPromise({
+            try: () => client.interruptTurn(threadId),
+            catch: (cause) => {
               abortingTurnIds.delete(String(threadId));
               return toAdapterError(threadId, "interruptTurn", cause);
-            }),
-          );
+            },
+          });
         }),
 
       respondToRequest: () =>
@@ -483,18 +485,19 @@ export const makePiAdapter = (
         ),
 
       stopSession: (threadId) =>
-        Effect.tryPromise(() => client.stopSession(threadId)).pipe(
-          Effect.mapError((cause) => toAdapterError(threadId, "stopSession", cause)),
-          Effect.asVoid,
-        ),
+        Effect.tryPromise({
+          try: () => client.stopSession(threadId),
+          catch: (cause) => toAdapterError(threadId, "stopSession", cause),
+        }).pipe(Effect.asVoid),
 
       listSessions: () => Effect.sync(() => client.listSessions()),
       hasSession: (threadId) => Effect.sync(() => client.hasSession(threadId)),
 
       readThread: (threadId) =>
-        Effect.tryPromise(() => client.readThread(threadId)).pipe(
-          Effect.mapError((cause) => toAdapterError(threadId, "readThread", cause)),
-        ),
+        Effect.tryPromise({
+          try: () => client.readThread(threadId),
+          catch: (cause) => toAdapterError(threadId, "readThread", cause),
+        }),
 
       rollbackThread: () =>
         Effect.fail(
