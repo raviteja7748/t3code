@@ -30,12 +30,16 @@ case "$(uname -s)" in
       echo "$tag is already installed"
       exit 0
     fi
-    gh release download "$tag" -R "$repo" -p 't3-pi-server.tgz' -D "$tmp"
-    mkdir -p "$install_root" "$HOME/.local/bin"
-    npm install --prefix "$install_root" --omit=dev "$tmp/t3-pi-server.tgz"
+    gh release download "$tag" -R "$repo" -p 't3-pi-server.tar.gz' -D "$tmp"
+    mkdir -p "$HOME/.local/bin" "$tmp/unpack"
+    tar -xzf "$tmp/t3-pi-server.tar.gz" -C "$tmp/unpack"
+    rm -rf "$install_root.next"
+    mv "$tmp/unpack/t3-pi-server" "$install_root.next"
+    rm -rf "$install_root"
+    mv "$install_root.next" "$install_root"
     cat > "$HOME/.local/bin/t3-pi" <<'EOF'
 #!/usr/bin/env bash
-exec node "$HOME/.local/share/t3-pi/node_modules/t3/dist/bin.mjs" "$@"
+exec node "$HOME/.local/share/t3-pi/dist/bin.mjs" "$@"
 EOF
     chmod +x "$HOME/.local/bin/t3-pi"
     printf '%s\n' "$tag" > "$install_root/.installed-tag"
