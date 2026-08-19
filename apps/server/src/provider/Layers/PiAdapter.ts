@@ -20,6 +20,7 @@ import {
   type ProviderRuntimeEvent,
   RuntimeItemId,
   ThreadId,
+  TurnId,
   type ProviderTurnStartResult,
 } from "@t3tools/contracts";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
@@ -89,7 +90,6 @@ function thinkingLevelFromResumeCursor(resumeCursor: unknown): string | undefine
   return asString(asRecord(resumeCursor)?.thinkingLevel);
 }
 
-/** Extract assistant text fragments from a Pi message / content block. */
 function collectPiTextFragments(value: unknown): string[] {
   if (typeof value === "string") return value.length > 0 ? [value] : [];
   if (!value || typeof value !== "object") return [];
@@ -99,17 +99,33 @@ function collectPiTextFragments(value: unknown): string[] {
     const text = asString(record.text);
     return text && text.length > 0 ? [text] : [];
   }
+  if (record.type === "thinking" || record.type === "redacted_thinking") return [];
   if ("content" in record) return collectPiTextFragments(record.content);
-  if (typeof record.delta === "string" && record.delta.length > 0) return [record.delta];
-  if (typeof record.text === "string" && record.text.length > 0) return [record.text];
   return [];
 }
 
-function extractAssistantText(message: unknown): string | undefined {
+function extractPiAssistantText(message: unknown): string | undefined {
   const record = asRecord(message);
   if (!record) return undefined;
-  const joined = collectPiTextFragments(record.content ?? record.partial).join("");
-  return joined.trim().length > 0 ? joined : undefined;
+  const content = collectPiTextFragments(record.content);
+  if (content.length > 0) {
+    const text = content.join("");
+    return text.trim().length > 0 ? text : undefined;
+  }
+  const directText = asString(record.text);
+  return directText?.trim() ? directText : undefined;
+}
+
+function hasVisibleAssistantText(message: unknown): boolean {
+  return extractPiAssistantText(message) !== undefined;
+}
+
+function assistantItemId(threadId: ThreadId, turnId?: TurnId): string {
+  return `pi-assistant:${threadId}:${turnId ?? "session"}`;
+}
+
+function assistantTurnKey(threadId: ThreadId, turnId?: TurnId): string {
+  return `${threadId}:${turnId ?? "session"}`;
 }
 
 export interface MakePiAdapterOptions {
@@ -134,8 +150,39 @@ export const makePiAdapter = (
     const offer = (event: ProviderRuntimeEvent) =>
       PubSub.publish(runtimeEventPubSub, event).pipe(Effect.asVoid);
 
+    const completedAssistantTurns = new Set<string>();
+    const abortingTurnIds = new Map<string, string>();
     const handleRpcEvent = (event: PiRpcRuntimeEvent) =>
       Effect.gen(function* () {
+        if (event.kind === "exit") {
+          abortingTurnIds.delete(String(event.threadId));
+          completedAssistantTurns.delete(assistantTurnKey(event.threadId, event.turnId));
+          if (event.expected) {
+            const stamp = yield* nextEvent();
+            yield* offer({
+              type: "session.exited",
+              ...stamp,
+              provider: PROVIDER,
+              threadId: event.threadId,
+              ...(event.turnId ? { turnId: event.turnId } : {}),
+              payload: { reason: "Pi session stopped", recoverable: true, exitKind: "graceful" },
+            });
+          } else {
+            const stamp = yield* nextEvent();
+            yield* offer({
+              type: "runtime.error",
+              ...stamp,
+              provider: PROVIDER,
+              threadId: event.threadId,
+              ...(event.turnId ? { turnId: event.turnId } : {}),
+              payload: {
+                message: `Pi RPC process exited unexpectedly (${event.code ?? "signal"}${event.signal ? `:${event.signal}` : ""}).`,
+                class: "transport_error",
+              },
+            });
+          }
+          return;
+        }
         if (event.kind !== "rpc-event") return;
         const { threadId, turnId, payload } = event;
         const type = payload.type;
@@ -143,6 +190,8 @@ export const makePiAdapter = (
 
         if (type === "turn_start") {
           if (!turnId) return;
+          abortingTurnIds.delete(String(threadId));
+          completedAssistantTurns.delete(assistantTurnKey(threadId, turnId));
           const stamp = yield* nextEvent();
           yield* offer({
             type: "turn.started",
@@ -156,9 +205,10 @@ export const makePiAdapter = (
         }
         if (type === "message_update") {
           const assistantEvent = asRecord(payload.assistantMessageEvent);
-          const delta = asString(assistantEvent?.delta);
           const assistantType = asString(assistantEvent?.type);
-          if (delta && (assistantType === "text_delta" || assistantType === "thinking_delta")) {
+          if (assistantType === "text_delta") {
+            const delta = asString(assistantEvent?.delta);
+            if (!delta) return;
             const stamp = yield* nextEvent();
             yield* offer({
               type: "content.delta",
@@ -166,30 +216,69 @@ export const makePiAdapter = (
               provider: PROVIDER,
               threadId,
               ...(turnId ? { turnId } : {}),
-              payload: {
-                streamKind:
-                  assistantType === "thinking_delta" ? "reasoning_text" : "assistant_text",
-                delta,
-                contentIndex: 0,
-              },
+              itemId: RuntimeItemId.make(assistantItemId(threadId, turnId)),
+              payload: { streamKind: "assistant_text", delta },
             });
+            return;
           }
-          return;
-        }
-        if (type === "message_end") {
-          const text = extractAssistantText(payload.message);
-          if (text) {
+          if (assistantType === "thinking_delta") {
+            const delta = asString(assistantEvent?.delta);
+            if (!delta) return;
             const stamp = yield* nextEvent();
             yield* offer({
-              type: "item.completed",
+              type: "content.delta",
               ...stamp,
               provider: PROVIDER,
               threadId,
               ...(turnId ? { turnId } : {}),
-              itemId: RuntimeItemId.make(`pi-assistant-${threadId}-${turnId ?? "session"}`),
-              payload: { itemType: "assistant_message", status: "completed", detail: text },
+              itemId: RuntimeItemId.make(assistantItemId(threadId, turnId)),
+              payload: { streamKind: "reasoning_text", delta },
             });
+            return;
           }
+          if (assistantType === "error") {
+            const stamp = yield* nextEvent();
+            yield* offer({
+              type: "runtime.error",
+              ...stamp,
+              provider: PROVIDER,
+              threadId,
+              ...(turnId ? { turnId } : {}),
+              payload: {
+                message:
+                  asString(assistantEvent?.reason) ??
+                  asString(assistantEvent?.error) ??
+                  "Pi assistant message failed.",
+                class: "provider_error",
+                detail: payload,
+              },
+            });
+            return;
+          }
+          return;
+        }
+        if (type === "message_end") {
+          const message = asRecord(payload.message);
+          if (asString(message?.role) !== "assistant") return;
+          if (!hasVisibleAssistantText(payload.message)) return;
+          completedAssistantTurns.add(assistantTurnKey(threadId, turnId));
+          const text = extractPiAssistantText(payload.message);
+          const stamp = yield* nextEvent();
+          yield* offer({
+            type: "item.completed",
+            ...stamp,
+            provider: PROVIDER,
+            threadId,
+            ...(turnId ? { turnId } : {}),
+            itemId: RuntimeItemId.make(assistantItemId(threadId, turnId)),
+            payload: {
+              itemType: "assistant_message",
+              status: "completed",
+              title: "Assistant message",
+              ...(text ? { detail: text } : {}),
+              data: payload.message,
+            },
+          });
           return;
         }
         if (type === "tool_execution_start") {
@@ -245,7 +334,35 @@ export const makePiAdapter = (
           });
           return;
         }
+        if (type === "turn_end") {
+          const key = assistantTurnKey(threadId, turnId);
+          if (!completedAssistantTurns.has(key) && hasVisibleAssistantText(payload.message)) {
+            completedAssistantTurns.add(key);
+            const text = extractPiAssistantText(payload.message);
+            const stamp = yield* nextEvent();
+            yield* offer({
+              type: "item.completed",
+              ...stamp,
+              provider: PROVIDER,
+              threadId,
+              ...(turnId ? { turnId } : {}),
+              itemId: RuntimeItemId.make(assistantItemId(threadId, turnId)),
+              payload: {
+                itemType: "assistant_message",
+                status: "completed",
+                title: "Assistant message",
+                ...(text ? { detail: text } : {}),
+                data: payload.message,
+              },
+            });
+          }
+          return;
+        }
         if (type === "agent_end") {
+          if (turnId) completedAssistantTurns.delete(assistantTurnKey(threadId, turnId));
+          const aborting = abortingTurnIds.get(String(threadId));
+          const interrupted = aborting !== undefined && (aborting === "*" || aborting === String(turnId));
+          if (interrupted) abortingTurnIds.delete(String(threadId));
           if (turnId) {
             const stamp = yield* nextEvent();
             yield* offer({
@@ -254,7 +371,7 @@ export const makePiAdapter = (
               provider: PROVIDER,
               threadId,
               turnId,
-              payload: { state: "completed", stopReason: null },
+              payload: { state: interrupted ? "interrupted" : "completed", stopReason: interrupted ? "abort" : null },
             });
           }
           return;
@@ -336,11 +453,16 @@ export const makePiAdapter = (
           );
         }),
 
-      interruptTurn: (threadId, _turnId) =>
-        Effect.tryPromise(() => client.interruptTurn(threadId)).pipe(
-          Effect.mapError((cause) => toAdapterError(threadId, "interruptTurn", cause)),
-          Effect.asVoid,
-        ),
+      interruptTurn: (threadId, turnId) =>
+        Effect.gen(function* () {
+          abortingTurnIds.set(String(threadId), turnId ? String(turnId) : "*");
+          yield* Effect.tryPromise(() => client.interruptTurn(threadId)).pipe(
+            Effect.mapError((cause) => {
+              abortingTurnIds.delete(String(threadId));
+              return toAdapterError(threadId, "interruptTurn", cause);
+            }),
+          );
+        }),
 
       respondToRequest: () =>
         Effect.fail(

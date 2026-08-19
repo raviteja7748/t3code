@@ -260,10 +260,17 @@ export class PiRpcClient {
       session.hasObservedTurnStart = true;
       session.status = "running";
       session.updatedAt = new Date().toISOString();
-    } else if (type === "agent_settled" || type === "agent_end") {
+    } else if (type === "agent_end") {
       if (session.currentTurnId) {
         session.turns.push({ id: session.currentTurnId, items: [] });
       }
+      session.status = "ready";
+      session.abortRequested = false;
+      session.hasObservedTurnStart = false;
+      session.currentTurnId = undefined;
+      session.updatedAt = new Date().toISOString();
+    } else if (type === "agent_settled") {
+      // agent_settled follows agent_end; don't duplicate turn history, just ensure ready state
       session.status = "ready";
       session.abortRequested = false;
       session.hasObservedTurnStart = false;
