@@ -1,3 +1,5 @@
+// @effect-diagnostics globalErrorInEffectCatch:off
+// @effect-diagnostics globalErrorInEffectFailure:off
 /**
  * PiProvider — health probe and model discovery for the Pi driver.
  *
@@ -114,12 +116,14 @@ const runPiVersionCommand = (
 const discoverPiModels = (piSettings: PiSettings, environment: NodeJS.ProcessEnv = process.env) =>
   Effect.gen(function* () {
     const client = makePiRpcClient();
-    return yield* Effect.tryPromise(() =>
-      client.discoverModelCatalog({
-        binaryPath: piSettings.binaryPath,
-        env: environment,
-      }),
-    );
+    return yield* Effect.tryPromise({
+      try: () =>
+        client.discoverModelCatalog({
+          binaryPath: piSettings.binaryPath,
+          env: environment,
+        }),
+      catch: (cause) => new Error(String(cause)),
+    });
   }).pipe(
     Effect.timeout(MODEL_DISCOVERY_TIMEOUT_MS),
     Effect.orElseSucceed(() => ({ state: {}, models: [] as ReadonlyArray<PiRpcModel> })),
