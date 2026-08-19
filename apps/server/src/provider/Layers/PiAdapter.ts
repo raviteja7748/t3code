@@ -22,6 +22,7 @@ import {
   ThreadId,
   type ProviderTurnStartResult,
 } from "@t3tools/contracts";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as PubSub from "effect/PubSub";
@@ -36,6 +37,7 @@ import {
 import { type ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import {
   makePiRpcClient,
+  normalizePiThinkingLevel,
   PI_RUNTIME_EVENT_TYPES,
   type PiRpcClient,
   type PiRpcRuntimeEvent,
@@ -55,6 +57,12 @@ const asString = (value: unknown): string | undefined =>
 
 function toMessage(cause: unknown, fallback: string): string {
   return cause instanceof Error && cause.message.trim().length > 0 ? cause.message : fallback;
+}
+
+function detailText(value: unknown, fallback: string): string {
+  if (typeof value === "string") return value;
+  if (value === undefined || value === null) return fallback;
+  return JSON.stringify(value);
 }
 
 function toAdapterError(threadId: ThreadId, method: string, cause: unknown): ProviderAdapterError {
@@ -108,6 +116,7 @@ export interface MakePiAdapterOptions {
   readonly instanceId?: string;
   readonly binaryPath?: string;
   readonly agentDir?: string;
+  readonly env?: NodeJS.ProcessEnv;
   readonly client?: PiRpcClient;
 }
 
@@ -132,9 +141,24 @@ export const makePiAdapter = (
         const type = payload.type;
         if (typeof type !== "string" || !PI_RUNTIME_EVENT_TYPES.has(type)) return;
 
+        if (type === "turn_start") {
+          if (!turnId) return;
+          const stamp = yield* nextEvent();
+          yield* offer({
+            type: "turn.started",
+            ...stamp,
+            provider: PROVIDER,
+            threadId,
+            turnId,
+            payload: {},
+          });
+          return;
+        }
         if (type === "message_update") {
-          const text = extractAssistantText(payload);
-          if (text) {
+          const assistantEvent = asRecord(payload.assistantMessageEvent);
+          const delta = asString(assistantEvent?.delta);
+          const assistantType = asString(assistantEvent?.type);
+          if (delta && (assistantType === "text_delta" || assistantType === "thinking_delta")) {
             const stamp = yield* nextEvent();
             yield* offer({
               type: "content.delta",
@@ -142,7 +166,12 @@ export const makePiAdapter = (
               provider: PROVIDER,
               threadId,
               ...(turnId ? { turnId } : {}),
-              payload: { streamKind: "assistant_text", delta: text, contentIndex: 0 },
+              payload: {
+                streamKind:
+                  assistantType === "thinking_delta" ? "reasoning_text" : "assistant_text",
+                delta,
+                contentIndex: 0,
+              },
             });
           }
           return;
@@ -163,8 +192,9 @@ export const makePiAdapter = (
           }
           return;
         }
-        if (type === "tool_call" || type === "tool_execution_start") {
-          const toolName = asString(payload.toolName) ?? asString(payload.name) ?? "tool";
+        if (type === "tool_execution_start") {
+          const toolName = asString(payload.toolName) ?? "tool";
+          const toolCallId = asString(payload.toolCallId) ?? randomUUID();
           const stamp = yield* nextEvent();
           yield* offer({
             type: "item.started",
@@ -172,13 +202,33 @@ export const makePiAdapter = (
             provider: PROVIDER,
             threadId,
             ...(turnId ? { turnId } : {}),
-            itemId: RuntimeItemId.make(`pi-tool-${threadId}-${randomUUID()}`),
+            itemId: RuntimeItemId.make(`pi-tool-${toolCallId}`),
             payload: { itemType: "dynamic_tool_call", status: "inProgress", detail: toolName },
           });
           return;
         }
-        if (type === "tool_result" || type === "tool_execution_end") {
-          const toolName = asString(payload.toolName) ?? asString(payload.name) ?? "tool";
+        if (type === "tool_execution_update") {
+          const toolCallId = asString(payload.toolCallId);
+          if (!toolCallId) return;
+          const stamp = yield* nextEvent();
+          yield* offer({
+            type: "item.updated",
+            ...stamp,
+            provider: PROVIDER,
+            threadId,
+            ...(turnId ? { turnId } : {}),
+            itemId: RuntimeItemId.make(`pi-tool-${toolCallId}`),
+            payload: {
+              itemType: "dynamic_tool_call",
+              status: "inProgress",
+              detail: detailText(payload.partialResult, asString(payload.toolName) ?? "tool"),
+            },
+          });
+          return;
+        }
+        if (type === "tool_execution_end") {
+          const toolName = asString(payload.toolName) ?? "tool";
+          const toolCallId = asString(payload.toolCallId) ?? randomUUID();
           const stamp = yield* nextEvent();
           yield* offer({
             type: "item.completed",
@@ -186,12 +236,16 @@ export const makePiAdapter = (
             provider: PROVIDER,
             threadId,
             ...(turnId ? { turnId } : {}),
-            itemId: RuntimeItemId.make(`pi-tool-${threadId}-${randomUUID()}`),
-            payload: { itemType: "dynamic_tool_call", status: "completed", detail: toolName },
+            itemId: RuntimeItemId.make(`pi-tool-${toolCallId}`),
+            payload: {
+              itemType: "dynamic_tool_call",
+              status: payload.isError === true ? "failed" : "completed",
+              detail: detailText(payload.result, toolName),
+            },
           });
           return;
         }
-        if (type === "agent_settled" || type === "agent_end" || type === "turn_end") {
+        if (type === "agent_end") {
           if (turnId) {
             const stamp = yield* nextEvent();
             yield* offer({
@@ -221,7 +275,14 @@ export const makePiAdapter = (
           const model =
             modelFromResumeCursor(input.resumeCursor) ??
             (input.modelSelection?.model ? String(input.modelSelection.model) : undefined);
-          const thought = thinkingLevelFromResumeCursor(input.resumeCursor);
+          const selectedThinking =
+            input.modelSelection &&
+            (!options?.instanceId || String(input.modelSelection.instanceId) === options.instanceId)
+              ? getModelSelectionStringOptionValue(input.modelSelection, "thinking_level")
+              : undefined;
+          const thought =
+            normalizePiThinkingLevel(selectedThinking) ??
+            normalizePiThinkingLevel(thinkingLevelFromResumeCursor(input.resumeCursor));
           const startInput: PiRpcStartSessionInput = {
             threadId: input.threadId,
             runtimeMode: input.runtimeMode,
@@ -231,6 +292,7 @@ export const makePiAdapter = (
             ...(thought ? { thinkingLevel: thought as PiThinkingLevel } : {}),
             ...(options?.binaryPath ? { binaryPath: options.binaryPath } : {}),
             ...(options?.agentDir ? { agentDir: options.agentDir } : {}),
+            ...(options?.env ? { env: options.env } : {}),
           };
           return yield* Effect.tryPromise(() => client.startSession(startInput)).pipe(
             Effect.mapError((cause) => toAdapterError(input.threadId, "startSession", cause)),
@@ -242,6 +304,13 @@ export const makePiAdapter = (
           const model = input.modelSelection?.model
             ? String(input.modelSelection.model)
             : undefined;
+          const thinkingLevel = normalizePiThinkingLevel(
+            input.modelSelection &&
+              (!options?.instanceId ||
+                String(input.modelSelection.instanceId) === options.instanceId)
+              ? getModelSelectionStringOptionValue(input.modelSelection, "thinking_level")
+              : undefined,
+          );
           const images = (input.attachments ?? [])
             .map((attachment): { type: "image"; data: string; mimeType: string } | undefined => {
               const record = asRecord(attachment);
@@ -258,6 +327,7 @@ export const makePiAdapter = (
               threadId: input.threadId,
               ...(input.input ? { input: input.input } : {}),
               ...(model ? { model } : {}),
+              ...(thinkingLevel ? { thinkingLevel } : {}),
               ...(images.length > 0 ? { images } : {}),
             }),
           ).pipe(

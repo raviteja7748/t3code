@@ -29,7 +29,7 @@ import {
   type RuntimeMode,
   type ProviderSession,
   type ThreadId,
-  type TurnId,
+  TurnId,
   type ProviderTurnStartResult,
 } from "@t3tools/contracts";
 import type {
@@ -565,7 +565,7 @@ export class PiRpcClient {
     if (input.thinkingLevel && input.thinkingLevel !== session.thinkingLevel) {
       await this.setThinkingLevel(session, input.thinkingLevel);
     }
-    const turnId = input.threadId as unknown as TurnId;
+    const turnId = TurnId.make(randomUUID());
     const previous = {
       currentTurnId: session.currentTurnId,
       hasObservedTurnStart: session.hasObservedTurnStart,
@@ -619,7 +619,8 @@ export class PiRpcClient {
     if (!session) throw new Error(`Unknown Pi RPC thread '${threadId}'.`);
     session.abortRequested = true;
     session.updatedAt = new Date().toISOString();
-    await this.sendCommand(session, { type: "abort" });
+    const response = await this.sendCommand(session, { type: "abort" });
+    if (!response.success) throw new Error(response.error ?? "Pi RPC abort failed.");
   }
 
   async stopSession(threadId: ThreadId): Promise<void> {
