@@ -109,6 +109,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
       const adapter = yield* makePiAdapter(effectiveConfig, {
         instanceId: String(instanceId),
         binaryPath: effectiveConfig.binaryPath,
+        env: processEnv,
       });
       const textGeneration = makePiTextGeneration();
 
