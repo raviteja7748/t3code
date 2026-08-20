@@ -75,12 +75,19 @@ if [ "$SKIP_TESTS" = true ]; then
   exit 0
 fi
 
-echo "→ running vp check"
-vp check
+VP="vp"
+if ! command -v vp >/dev/null 2>&1; then
+  if [ -x "./node_modules/.bin/vp" ]; then VP="./node_modules/.bin/vp"
+  elif command -v pnpm >/dev/null 2>&1; then VP="pnpm exec vp"
+  elif command -v npx >/dev/null 2>&1; then VP="npx vp"
+  fi
+fi
+echo "→ running vp check (via $VP)"
+$VP check
 echo "→ running typecheck"
-vp run --filter t3 --filter @t3tools/web typecheck
+$VP run --filter t3 --filter @t3tools/web typecheck
 echo "→ running tests"
-vp run --filter t3 test
+$VP run --filter t3 test
 
 echo ""
 echo "✓ Local sync green — push with:"
