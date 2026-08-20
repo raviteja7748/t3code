@@ -335,6 +335,8 @@ export const makePiAdapter = (
           return;
         }
         if (type === "turn_end") {
+          const msg = asRecord(payload.message);
+          if (asString(msg?.role) !== "assistant") return;
           const key = assistantTurnKey(threadId, turnId);
           if (!completedAssistantTurns.has(key) && hasVisibleAssistantText(payload.message)) {
             completedAssistantTurns.add(key);
@@ -361,7 +363,8 @@ export const makePiAdapter = (
         if (type === "agent_end") {
           if (turnId) completedAssistantTurns.delete(assistantTurnKey(threadId, turnId));
           const aborting = abortingTurnIds.get(String(threadId));
-          const interrupted = aborting !== undefined && (aborting === "*" || aborting === String(turnId));
+          const interrupted =
+            aborting !== undefined && (aborting === "*" || aborting === String(turnId));
           if (interrupted) abortingTurnIds.delete(String(threadId));
           if (turnId) {
             const stamp = yield* nextEvent();
@@ -371,7 +374,10 @@ export const makePiAdapter = (
               provider: PROVIDER,
               threadId,
               turnId,
-              payload: { state: interrupted ? "interrupted" : "completed", stopReason: interrupted ? "abort" : null },
+              payload: {
+                state: interrupted ? "interrupted" : "completed",
+                stopReason: interrupted ? "abort" : null,
+              },
             });
           }
           return;
